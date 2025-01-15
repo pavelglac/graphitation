@@ -21,10 +21,14 @@ jobs:
         run: yarn install
       - name: Bump version
         run: yarn beachball bump
-      - name: Push changes
+      - name: Check for changes and push
         run: |
-          git config user.email "gql-svc@microsoft.com"
-          git config user.name "Graphitation Service Account"
-          git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/microsoft/graphitation.git
-          git diff --quiet || git commit -m "applying package updates"
-          git push origin main
+          if [ -n "$(git diff)" ]; then
+            git config user.email "gql-svc@microsoft.com"
+            git config user.name "Graphitation Service Account"
+            git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/microsoft/graphitation.git
+            git commit -am "applying package updates"
+            git push
+          else
+            echo "No changes to commit"
+              fi
