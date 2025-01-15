@@ -60,7 +60,7 @@ extends:
                   git remote set-url origin https://gql-svc:$(ossGithubPAT)@github.com/microsoft/graphitation.git
                   git fetch --depth=2
                 displayName: Configure git for release
-              - script: yarn release -y -n $(ossNpmToken) --access public
+              - script: yarn release --no-push -y -n $(ossNpmToken) --access public
                 displayName: Release
               - task: 1ES.PublishPipelineArtifact@1
                 displayName: 📒 Publish Manifest
