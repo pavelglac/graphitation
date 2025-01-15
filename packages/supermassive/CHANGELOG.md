@@ -1,8 +1,16 @@
 # Change Log - @graphitation/supermassive
 
-<!-- This log was last generated on Thu, 02 Jan 2025 12:43:51 GMT and should not be manually modified. -->
+<!-- This log was last generated on Wed, 15 Jan 2025 11:31:53 GMT and should not be manually modified. -->
 
 <!-- Start content -->
+
+## 3.8.1
+
+Wed, 15 Jan 2025 11:31:53 GMT
+
+### Patches
+
+- Change files (pavelglac@microsoft.com)
 
 ## 3.8.0
 
