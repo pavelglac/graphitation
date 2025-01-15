@@ -10,9 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v2
-        with:
-          fetch-depth: 0
+        uses: actions/checkout@v3
       - name: Set up Node.js
         uses: actions/setup-node@v2
         with:
@@ -26,9 +24,8 @@ jobs:
           if [ -n "$(git diff)" ]; then
             git config user.email "gql-svc@microsoft.com"
             git config user.name "Graphitation Service Account"
-            git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/pavelglac/graphitation.git
             git commit -am "applying package updates"
-            git push origin user-pavelglac-bumping-version
+            git push
           else
             echo "No changes to commit"
               fi
