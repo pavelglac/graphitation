@@ -3,11 +3,7 @@ name: Release
 permissions:
   contents: write
 
-on:
-  workflow_run:
-    workflows: ["Release Pipeline"]
-    types:
-      - completed
+on: pull_request
 
 jobs:
   bump-version:

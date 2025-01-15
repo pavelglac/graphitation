@@ -1,0 +1,7 @@
+{
+  "type": "patch",
+  "comment": "Change files",
+  "packageName": "@graphitation/supermassive",
+  "email": "pavelglac@microsoft.com",
+  "dependentChangeType": "patch"
+}
