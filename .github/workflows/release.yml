@@ -1,0 +1,31 @@
+name: Release
+
+permissions:
+  contents: write
+
+on: pull_request
+
+jobs:
+  bump-version:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+      - name: Set up Node.js
+        uses: actions/setup-node@v2
+        with:
+          node-version: "18"
+      - name: Install dependencies
+        run: yarn install
+      - name: Bump version
+        run: yarn beachball bump
+      - name: Check for changes and push
+        run: |
+          if [ -n "$(git diff)" ]; then
+            git config user.email "gql-svc@microsoft.com"
+            git config user.name "Graphitation Service Account"
+            git commit -am "applying package updates"
+            git push
+          else
+            echo "No changes to commit"
+              fi

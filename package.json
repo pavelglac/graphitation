@@ -19,9 +19,10 @@
     "lage": "lage",
     "ci": "yarn lage build types test lint && yarn checkchange",
     "beachball": "beachball -b origin/main",
+    "bump": "yarn beachball bump",
     "change": "yarn beachball change",
     "checkchange": "yarn beachball check",
-    "release": "yarn beachball publish -t latest",
+    "release": "yarn beachball publish -t latest --no-push",
     "postinstall": "patch-package"
   },
   "devDependencies": {
