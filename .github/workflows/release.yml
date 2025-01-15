@@ -28,7 +28,7 @@ jobs:
             git config user.name "Graphitation Service Account"
             git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/microsoft/graphitation.git
             git commit -am "applying package updates"
-            git push
+            git push origin user-pavelglac-bumping-version
           else
             echo "No changes to commit"
               fi
