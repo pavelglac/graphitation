@@ -3,7 +3,10 @@ name: Release
 permissions:
   contents: write
 
-on: pull_request
+on:
+  push:
+    branches:
+      - main
 
 jobs:
   bump-version:
@@ -15,6 +18,7 @@ jobs:
         uses: actions/setup-node@v2
         with:
           node-version: "18"
+          cache: "yarn"
       - name: Install dependencies
         run: yarn install
       - name: Bump version
