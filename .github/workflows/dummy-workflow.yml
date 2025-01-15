@@ -1,0 +1,16 @@
+name: Dummy Workflow
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  dummy-job:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dummy Step
+        run: |
+          echo "Starting dummy step..."
+          sleep 5
+          echo "Dummy step completed successfully."
