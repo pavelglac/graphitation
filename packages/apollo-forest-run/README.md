@@ -3,6 +3,33 @@
 **Experimental** custom cache for Apollo client using indexing and diffing for data syncing (instead of normalization).
 Aims to be a drop-in replacement* for Apollo InMemoryCache.
 
+## Deferred writes
+
+The patched Apollo Client 3.14.0 forwards incremental responses to Forest Run
+instead of merging them into the latest query result. Object-data defer patches
+are supported. Supermassive adds
+`pending: [{ path, label? }]` to the initial response; subsequent patches retain
+their existing absolute `path`.
+
+Both initial results and patches use `cache.write`. Its optional `defer` context
+contains an execution `token` and either initial `pending` paths or a patch `path`.
+Indexing creates placeholders containing the original identities and selections.
+Pending-path matching is transient; only the placeholder map is retained.
+Patch writes use those placeholders, so a
+concurrent list reorder or relationship change does not redirect deferred data.
+For ancestor patches, bindings also cover existing descendants, avoiding rewrites
+of already delivered relationships. Existing cached fields remain visible while
+the response is pending. Bindings are released on completion, cancellation, or
+cache reset; patch results are not retained as separate cached operations. Apollo
+calls `releaseIncremental(token)` on completion or cancellation.
+Forest Run also releases the affected execution's placeholders if a write throws,
+including direct writes outside Apollo.
+
+This is an additive extension of the existing path-based protocol, not an
+implementation of the newer `id` / `subPath` / `completed` draft. Registering new
+nested deferred targets introduced by patches and `@stream` cache writes are not
+implemented here.
+
 # Motivation
 
 Most GraphQL clients use "normalization" as a method to keep data in cache up-to date.

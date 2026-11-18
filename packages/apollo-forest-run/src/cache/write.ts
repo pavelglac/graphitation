@@ -1,5 +1,8 @@
-import type { Cache } from "@apollo/client";
-import type { IndexedTree, UpdateTreeResult } from "../forest/types";
+import type {
+  DeferredPlaceholders,
+  IndexedTree,
+  UpdateTreeResult,
+} from "../forest/types";
 import type { OperationResult } from "../values/types";
 import type {
   CacheEnv,
@@ -10,6 +13,7 @@ import type {
   Store,
   Transaction,
   WriteResult,
+  WriteOptions,
 } from "./types";
 import type { NodeKey, OperationDescriptor } from "../descriptor/types";
 import { assert } from "../jsutils/assert";
@@ -43,31 +47,75 @@ export function write(
   env: CacheEnv,
   store: Store,
   activeTransaction: Transaction,
-  options: Cache.WriteOptions,
-): WriteResult {
-  const { mergePolicies, objectKey, addTypename, keyMap } = env;
+  options: WriteOptions,
+  deferred?: DeferredPlaceholders,
+): WriteResult | undefined {
+  const { objectKey, addTypename, keyMap } = env;
   const targetForest = getActiveForest(store, activeTransaction);
 
-  const writeData =
+  let writeData =
     typeof options.result === "object" && options.result !== null
       ? options.result
       : {};
-  const rootNodeKey = options.dataId ?? objectKey(writeData);
+  const placeholder =
+    options.defer?.path && deferred?.get(options.defer.path.join("."));
+  if (options.defer?.path) {
+    assert(deferred, "Unknown deferred execution");
+    assert(
+      options.result && typeof options.result === "object",
+      "Deferred patches must contain object data",
+    );
+    if (Array.isArray(writeData)) {
+      writeData.forEach(writeChild);
+      return;
+    }
+    assert(placeholder, "Deferred path does not identify an original target");
+    // Delivered relationships locate child placeholders, but must not restore old list layouts.
+    const data: Record<string, unknown> = Object.create(null);
+    let hasFields = false;
+    for (const field of Object.keys(writeData)) {
+      if (!placeholder.delivered.has(field)) {
+        data[field] = writeData[field];
+        hasFields = true;
+      } else if (placeholder.delivered.get(field)) {
+        writeChild(writeData[field], field);
+      }
+    }
+    if (
+      !hasFields ||
+      targetForest.deletedNodes.has(placeholder.owner) ||
+      getNodeChunks([targetForest], placeholder.key).next().done
+    )
+      return;
+    data.__typename = placeholder.type;
+    writeData = data;
+  }
+  const rootNodeKey =
+    placeholder?.key ?? options.dataId ?? objectKey(writeData);
   assert(rootNodeKey !== false);
 
   // ApolloCompat (apollo allows writing fragments without proper id in the data)
-  if (rootNodeKey !== undefined && options.dataId) {
+  if (rootNodeKey !== undefined && (options.dataId || placeholder)) {
     keyMap?.set(writeData, rootNodeKey);
   }
-  const operationDescriptor = resolveOperationDescriptor(
-    env,
-    store,
-    options.query,
-    options.variables,
-    rootNodeKey,
-  );
-  touchOperation(env, store, operationDescriptor);
-  if (!operationDescriptor.cache) {
+  const operationDescriptor = placeholder
+    ? {
+        ...placeholder.operation,
+        rootNodeKey: placeholder.key,
+        rootType: placeholder.type,
+        possibleSelections: placeholder.selection,
+        cache: false,
+        historySize: 0,
+      }
+    : resolveOperationDescriptor(
+        env,
+        store,
+        options.query,
+        options.variables,
+        rootNodeKey,
+      );
+  if (!placeholder) touchOperation(env, store, operationDescriptor);
+  if (!placeholder && !operationDescriptor.cache) {
     // Results of this operation are never stored, so nothing will ever evict its descriptor.
     // Remember it, so that the outermost transaction can release it on completion.
     // (the set only exists when `env.cleanupNonCacheableOperations` is enabled)
@@ -82,18 +130,24 @@ export function write(
     throw new Error(`Could not identify object ${inspect(writeData)}`);
   }
 
-  let existingResult = getExistingResult(
-    env,
-    store,
-    targetForest,
-    operationDescriptor,
-  );
+  let existingResult = placeholder
+    ? undefined
+    : getExistingResult(env, store, targetForest, operationDescriptor);
   const existingData = existingResult?.result.data;
 
   // Safeguard: make sure previous state doesn't leak outside write operation
   assert(!existingResult?.prev);
 
-  if (writeData === existingData && existingResult) {
+  const pending =
+    deferred && !options.defer?.path && options.defer?.pending?.length
+      ? {
+          pending: new Set(
+            options.defer.pending.map(({ path }) => path.join(".")),
+          ),
+          placeholders: deferred,
+        }
+      : undefined;
+  if (writeData === existingData && existingResult && !pending) {
     return {
       options,
       incoming: existingResult,
@@ -104,7 +158,7 @@ export function write(
     };
   }
 
-  if (!ROOT_NODES.includes(operationDescriptor.rootNodeKey)) {
+  if (!placeholder && !ROOT_NODES.includes(operationDescriptor.rootNodeKey)) {
     const typeName = resolveExtraRootNodeType(
       env,
       store,
@@ -127,10 +181,21 @@ export function write(
     operationResult,
     undefined,
     existingResult,
+    pending,
   );
+  for (const path of pending?.pending ?? EMPTY_ARRAY) {
+    assert(
+      pending?.placeholders.has(path),
+      "Pending path does not identify an object in the response",
+    );
+  }
 
   // ApolloCompat: necessary for fragment writes with custom ids
-  if (options.dataId && incomingResult.rootNodeKey !== options.dataId) {
+  if (
+    !placeholder &&
+    options.dataId &&
+    incomingResult.rootNodeKey !== options.dataId
+  ) {
     const rootNode = incomingResult.nodes.get(incomingResult.rootNodeKey);
     assert(rootNode);
     incomingResult.nodes.set(options.dataId, rootNode);
@@ -141,7 +206,7 @@ export function write(
   const modifiedIncomingResult = applyMergePolicies(
     env,
     getEffectiveReadLayers(store, targetForest, false),
-    mergePolicies,
+    env.mergePolicies,
     incomingResult,
     options.overwrite ?? false,
   );
@@ -216,6 +281,23 @@ export function write(
     affectedNodes: aggregateAllAffectedNodes(difference, allUpdates),
     updateStats: allUpdates.map((update) => update.stats ?? null),
   };
+
+  function writeChild(value: unknown, part: string | number) {
+    if (value === null || typeof value !== "object") return;
+    assert(options.defer?.path);
+    const child = write(
+      env,
+      store,
+      activeTransaction,
+      {
+        ...options,
+        result: value,
+        defer: { ...options.defer, path: [...options.defer.path, part] },
+      },
+      deferred,
+    );
+    if (child) activeTransaction.changelog.push(child);
+  }
 }
 
 function appendAffectedOperationsFromOtherLayers(

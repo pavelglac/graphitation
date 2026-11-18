@@ -64,6 +64,23 @@ export type IndexedTree = {
   danglingReferences?: Set<NodeKey>;
 };
 
+export type DeferredPlaceholders = Map<
+  string,
+  {
+    key: NodeKey;
+    type: TypeName;
+    operation: OperationDescriptor;
+    selection: PossibleSelections;
+    owner: NodeKey;
+    delivered: Map<string, boolean>; // Response key -> composite field.
+  }
+>;
+
+export type DeferredWriteContext = {
+  pending: Set<string>;
+  placeholders: DeferredPlaceholders;
+};
+
 export type HistoryFieldChange =
   | FillerChange
   | ReplacementChange

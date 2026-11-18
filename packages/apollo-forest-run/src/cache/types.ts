@@ -152,6 +152,14 @@ export type WriteResult = {
   updateStats?: UpdateForestStats;
 };
 
+export type WriteOptions = Cache.WriteOptions & {
+  defer?: {
+    token: object;
+    pending?: readonly { path: readonly (string | number)[]; label?: string }[];
+    path?: readonly (string | number)[];
+  };
+};
+
 export type ModifiedNodeDifference = ObjectDifference & {
   fieldsToInvalidate: Set<NormalizedFieldEntry>;
   fieldsToDelete: Set<NormalizedFieldEntry>;
