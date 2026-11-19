@@ -1,34 +1,32 @@
 # Forest Run
 
 **Experimental** custom cache for Apollo client using indexing and diffing for data syncing (instead of normalization).
-Aims to be a drop-in replacement* for Apollo InMemoryCache.
+Aims to be a drop-in replacement\* for Apollo InMemoryCache.
 
 ## Deferred writes
 
-The patched Apollo Client 3.14.0 forwards incremental responses to Forest Run
-instead of merging them into the latest query result. Object-data defer patches
-are supported. Supermassive adds
-`pending: [{ path, label? }]` to the initial response; subsequent patches retain
-their existing absolute `path`.
+Deferred patches are bound to the objects they were announced for, so a list
+reorder or relationship change while a response is pending cannot redirect them
+to a different entity. Supermassive adds `pending: [{ path, label? }]` to the
+initial response; patches keep their existing absolute `path`.
 
-Both initial results and patches use `cache.write`. Its optional `defer` context
-contains an execution `token` and either initial `pending` paths or a patch `path`.
-Indexing creates placeholders containing the original identities and selections.
-Pending-path matching is transient; only the placeholder map is retained.
-Patch writes use those placeholders, so a
-concurrent list reorder or relationship change does not redirect deferred data.
-For ancestor patches, bindings also cover existing descendants, avoiding rewrites
-of already delivered relationships. Existing cached fields remain visible while
-the response is pending. Bindings are released on completion, cancellation, or
-cache reset; patch results are not retained as separate cached operations. Apollo
-calls `releaseIncremental(token)` on completion or cancellation.
-Forest Run also releases the affected execution's placeholders if a write throws,
-including direct writes outside Apollo.
+The patched Apollo Client 3.14.0 `QueryInfo` passes a `defer` context to
+`cache.write`: an execution `token` with the initial `pending` paths, or with the
+patch `path`. It calls `cache.releaseIncremental(token)` on completion, error,
+refetch or cancellation. Caches without `releaseIncremental` keep Apollo's
+original behavior.
 
-This is an additive extension of the existing path-based protocol, not an
-implementation of the newer `id` / `subPath` / `completed` draft. Registering new
-nested deferred targets introduced by patches and `@stream` cache writes are not
-implemented here.
+While indexing the initial result, Forest Run records a placeholder for every
+pending path: the nearest keyed object (the owner), its selection in the original
+operation and the path relative to it. A patch is written as a regular sparse
+write to that owner, so merge policies, watchers and other queries reading the
+same entity behave as for any other write. Positions inside an owner are
+resolved against its current data, as in Apollo. Patches for evicted owners are
+skipped. Placeholders are released when the execution finishes, the cache is
+reset, or a deferred write throws.
+
+Only object-data patches for paths announced in `pending` are supported. Nested
+`@defer` targets introduced by patches and `@stream` are not implemented.
 
 # Motivation
 
@@ -277,7 +275,6 @@ This is achieved through aggregated entity views.
 It is basically a short-living object that is created on demand (e.g. for diffing phase). This object is fed
 with different chunks of the same entity found in different GraphQL results (via indexing) and so is a convenience tool
 to represent single entity state from multiple chunks.
-
 
 [1]: ./docs/normalization-pitfalls.md
 [2]: https://medium.com/open-graphql/graphql-subscriptions-vs-live-queries-e38302c7ab8e

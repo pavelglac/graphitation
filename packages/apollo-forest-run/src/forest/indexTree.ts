@@ -16,11 +16,13 @@ import type {
   SourceObject,
   TypeMap,
   ParentLocator,
+  NodeKey,
 } from "../values/types";
 import type {
   NormalizedFieldEntry,
   OperationDescriptor,
   PossibleSelections,
+  TypeName,
 } from "../descriptor/types";
 import type { DeferredWriteContext, ForestEnv, IndexedTree } from "./types";
 import { addTypenameToDocument } from "../descriptor/addTypenameToDocument";
@@ -69,8 +71,13 @@ type Context = {
   deferred?: DeferredWriteContext;
 };
 
-type DeferredPosition = { path: string; active: boolean; owner: string };
-const DEFERRED_KEY_PREFIX = "__forest_defer:";
+// Tracks the response path and the nearest keyed object (owner) with the path below it.
+type DeferredPosition = {
+  path: string;
+  active: boolean;
+  owner?: { key: NodeKey; type: TypeName; selection: PossibleSelections };
+  ownerPath: (string | number)[];
+};
 
 function childPosition(
   position: DeferredPosition,
@@ -79,6 +86,7 @@ function childPosition(
   return {
     ...position,
     path: `${position.path ? position.path + "." : ""}${part}`,
+    ownerPath: [...position.ownerPath, part],
   };
 }
 
@@ -134,7 +142,7 @@ export function indexTree(
     result.data,
     operation.possibleSelections,
     rootRef,
-    deferred ? { path: "", active: false, owner: rootNodeKey } : undefined,
+    deferred ? { path: "", active: false, ownerPath: [] } : undefined,
   );
   const tree: IndexedTree = {
     operation,
@@ -310,7 +318,7 @@ function indexSourceObject(
   const key = typeof objectKeyResult === "string" ? objectKeyResult : false;
   const missingFields = knownMissingFields?.get(source);
 
-  let chunk = createTypedObjectChunk(
+  const chunk = createTypedObjectChunk(
     op,
     possibleSelections,
     source,
@@ -320,35 +328,25 @@ function indexSourceObject(
   );
   if (context.deferred && position) {
     position.active ||= context.deferred.pending.has(position.path);
-    if (chunk.key && !chunk.key.startsWith(DEFERRED_KEY_PREFIX))
-      position.owner = chunk.key;
+    if (key !== false) {
+      assert(typeName, "Deferred owners must include __typename");
+      position.owner = { key, type: typeName, selection: possibleSelections };
+      position.ownerPath = [];
+    }
     if (position.active) {
-      const type = chunk.type;
-      assert(type, "Pending targets must include __typename");
-      let key = chunk.key;
-      if (!key) {
-        assert(op.env.genId);
-        key = `${DEFERRED_KEY_PREFIX}${op.env.genId()}`;
-        chunk = { ...chunk, key };
-      }
-      env.keyMap?.set(source, key);
-      const delivered = new Map<string, boolean>();
+      assert(position.owner);
       for (const field of chunk.selection.fieldQueue) {
-        if (source[field.dataKey] !== undefined) {
-          delivered.set(field.dataKey, !!field.selection);
-        } else if (
+        if (
+          source[field.dataKey] === undefined &&
           !field.__refs.every(({ node }) => addTypenameToDocument.added(node))
         ) {
           (chunk.missingFields ??= new Set()).add(field);
         }
       }
       context.deferred.placeholders.set(position.path, {
-        key,
-        type,
+        ...position.owner,
         operation: op,
-        selection: possibleSelections,
-        owner: position.owner,
-        delivered,
+        path: position.ownerPath,
       });
     }
   }
@@ -362,8 +360,8 @@ function indexSourceObject(
     markAsPartial(context, parent);
     context.incompleteChunks.add(chunk);
   }
-  if (chunk.key !== false) {
-    accumulate(nodes, chunk.key, chunk);
+  if (key !== false) {
+    accumulate(nodes, key, chunk);
   }
   if (typeName !== undefined) {
     accumulate(typeMap, typeName, chunk as NodeChunk);
@@ -448,6 +446,9 @@ function indexSourceList(
   parent: GraphChunkReference,
   position?: DeferredPosition,
 ) {
+  if (context.deferred && position?.active) {
+    context.deferred.placeholders.set(position.path, null);
+  }
   const recycleTree = context.recycleTree;
   const recyclable =
     recycleTree?.dataMap.get(list) ?? recycleTree?.prev?.dataMap.get(list);

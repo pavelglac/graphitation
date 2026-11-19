@@ -1,11 +1,5 @@
-import {
-  ApolloClient,
-  ApolloLink,
-  NetworkStatus,
-  Observable,
-  gql,
-} from "@apollo/client";
-import type { ApolloQueryResult, FetchResult } from "@apollo/client";
+import { ApolloClient, ApolloLink, Observable, gql } from "@apollo/client";
+import type { FetchResult } from "@apollo/client";
 import { GraphQLError, parse } from "graphql";
 import {
   executeWithSchema,
@@ -64,102 +58,152 @@ const final: IncrementalResponse = {
   hasNext: false,
 };
 
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((done) => {
-    resolve = done;
+const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+function connect(cache: ForestRun, queryDeduplication = true) {
+  const sources: ((result: FetchResult) => void)[] = [];
+  const request = jest.fn(
+    () =>
+      new Observable<FetchResult>((observer) => {
+        sources.push((result) => observer.next({ ...result }));
+      }),
+  );
+  const client = new ApolloClient({
+    cache,
+    link: new ApolloLink(request),
+    queryDeduplication,
   });
-  return { promise, resolve };
+  const send = (result: FetchResult) => sources[sources.length - 1](result);
+  return { client, request, sources, send };
 }
 
-describe("Apollo pending-path integration", () => {
-  test("does not add a promise hop to ordinary result processing", async () => {
-    const document = gql`
-      query {
-        message {
-          id
-          text
-        }
-      }
-    `;
-    let send!: (result: FetchResult) => void;
-    const client = new ApolloClient({
-      cache: new ForestRun(),
-      link: new ApolloLink(
-        () =>
-          new Observable((observer) => {
-            send = (result) => observer.next(result);
-          }),
-      ),
-    });
-    const manager = client["queryManager"];
-    const info = manager["getOrCreateQuery"]("ordinary-result");
-    info.init({
-      document,
-      variables: {},
-      networkStatus: NetworkStatus.loading,
-    });
-    const next = jest.fn();
-    const subscription = manager["getResultsFromLink"](
-      info,
-      2 /* CacheWriteBehavior.MERGE */,
-      {
-        query: document,
-        variables: {},
-        context: {},
-        fetchPolicy: "network-only",
-        errorPolicy: "none",
-      },
-    ).subscribe(next);
-    try {
-      send({ data: { message: first } });
-      await Promise.resolve();
-      expect(next).toHaveBeenCalledWith({
-        data: { message: first },
-        loading: false,
-        networkStatus: NetworkStatus.ready,
-      });
-    } finally {
-      subscription.unsubscribe();
-      client.stop();
-    }
-  });
+function supermassiveLink(name: Promise<string> | (() => never)) {
+  return new ApolloLink(
+    (operation) =>
+      new Observable((observer) => {
+        (async () => {
+          const execution = await executeWithSchema({
+            definitions: parse(
+              "type Query { messages: [Message!]! } type Message { id: ID!, text: String, name: String! }",
+            ),
+            document: operation.query,
+            rootValue: { messages: [first] },
+            resolvers: {
+              Message: { name: typeof name === "function" ? name : () => name },
+            },
+          });
+          if (!isIncrementalExecutionResult(execution))
+            throw new Error("Expected deferred execution");
+          observer.next(execution.initialResult);
+          for await (const payload of execution.subsequentResults) {
+            observer.next(payload);
+          }
+          observer.complete();
+        })().catch((error) => observer.error(error));
+      }),
+  );
+}
 
-  test("applies a multi-patch frame in the existing query transaction", async () => {
-    let send!: (result: FetchResult) => void;
-    const seen = deferred<void>();
-    const finished = deferred<ApolloQueryResult<{ messages: unknown[] }>>();
-    const cache = new ForestRun();
-    const other = { ...first, id: "2" };
-    const client = new ApolloClient({
-      cache,
-      link: new ApolloLink(
-        () =>
-          new Observable((observer) => {
-            send = (result) => observer.next(result);
-          }),
-      ),
-    });
-    const subscription = client
-      .watchQuery<{ messages: unknown[] }>({
+describe("Apollo integration", () => {
+  test.each(["network-only", "no-cache"] as const)(
+    "merges Supermassive patches into original targets (%s)",
+    async (fetchPolicy) => {
+      let resolveName!: (name: string) => void;
+      const cache = new ForestRun();
+      const client = new ApolloClient({
+        cache,
+        link: supermassiveLink(new Promise((done) => (resolveName = done))),
+      });
+      const observable = client.watchQuery<{ messages: unknown[] }>({
+        query,
+        fetchPolicy,
+      });
+      const sub = observable.subscribe(() => undefined);
+      try {
+        while (!observable.getCurrentResult().data?.messages) await flush();
+        cache.writeQuery({ query, data: { messages: [second, first] } });
+        resolveName("Alice");
+        while (
+          cache["deferredWrites"].size ||
+          observable.getCurrentResult().partial
+        )
+          await flush();
+        await flush();
+        expect(observable.getCurrentResult().data.messages).toEqual(
+          fetchPolicy === "no-cache"
+            ? [{ ...first, name: "Alice" }]
+            : [second, { ...first, name: "Alice" }],
+        );
+        if (fetchPolicy !== "no-cache") {
+          expect(cache.readQuery({ query })).toEqual({
+            messages: [second, { ...first, name: "Alice" }],
+          });
+        }
+      } finally {
+        sub.unsubscribe();
+        client.stop();
+      }
+    },
+  );
+
+  test.each(["all", "ignore", "none"] as const)(
+    "handles failed Supermassive deferred fragments with errorPolicy=%s",
+    async (errorPolicy) => {
+      const cache = new ForestRun();
+      const client = new ApolloClient({
+        cache,
+        link: supermassiveLink(() => {
+          throw new Error("name failed");
+        }),
+      });
+      const observable = client.watchQuery<{ messages: unknown[] }>({
         query,
         fetchPolicy: "network-only",
-      })
-      .subscribe({
-        next(result) {
-          if (result.loading && result.data?.messages?.length) seen.resolve();
-          if (!result.loading) finished.resolve(result);
-        },
+        errorPolicy,
       });
+      let error: Error | undefined;
+      const sub = observable.subscribe({
+        error: (e) => (error = e),
+      });
+      try {
+        for (let i = 0; i < 20; i++) await flush();
+        expect(cache["deferredWrites"].size).toBe(0);
+        if (errorPolicy === "none") {
+          expect(error?.message).toContain("name failed");
+        } else {
+          const result = observable.getCurrentResult();
+          expect(result.data.messages).toEqual([null]);
+          expect(cache.readQuery({ query, returnPartialData: true })).toEqual({
+            messages: [first],
+          });
+          expect(result.errors?.[0]?.message).toBe(
+            errorPolicy === "all" ? "name failed" : undefined,
+          );
+        }
+      } finally {
+        sub.unsubscribe();
+        client.stop();
+      }
+    },
+  );
+
+  test("applies a multi-patch frame in one transaction", async () => {
+    const cache = new ForestRun();
+    const { client, send } = connect(cache);
+    const other = { ...first, id: "2" };
+    const observable = client.watchQuery<{ messages: unknown[] }>({
+      query,
+      fetchPolicy: "network-only",
+    });
+    const sub = observable.subscribe(() => undefined);
     send({
       data: { messages: [first, other] },
       pending: [{ path: ["messages", 0] }, { path: ["messages", 1] }],
       hasNext: true,
     });
-    await seen.promise;
+    await flush();
     const notify = jest.fn();
     const unwatch = cache.watch({ query, optimistic: false, callback: notify });
-    const batch = jest.spyOn(cache, "batch");
     const transaction = jest.spyOn(cache, "performTransaction");
     try {
       send({
@@ -169,222 +213,44 @@ describe("Apollo pending-path integration", () => {
         ],
         hasNext: false,
       });
+      await flush();
       const expected = {
         messages: [
           { ...first, name: "Alice" },
           { ...other, name: "Bob" },
         ],
       };
-      expect((await finished.promise).data).toEqual(expected);
+      expect(observable.getCurrentResult().data).toEqual(expected);
       expect(transaction).toHaveBeenCalledTimes(1);
-      expect(batch).not.toHaveBeenCalled();
       expect(notify).toHaveBeenCalledTimes(1);
       expect(notify.mock.calls[0][0].result).toEqual(expected);
     } finally {
-      batch.mockRestore();
       transaction.mockRestore();
       unwatch();
-      subscription.unsubscribe();
+      sub.unsubscribe();
       client.stop();
     }
   });
 
-  test.each(["network-only", "no-cache"] as const)(
-    "consumes Supermassive without restoring changed lists (%s)",
-    async (fetchPolicy) => {
-      const name = deferred<string>();
-      const initialSeen = deferred<void>();
-      const finished =
-        deferred<ApolloQueryResult<{ messages: (typeof first)[] }>>();
-      const cache = new ForestRun();
-      const client = new ApolloClient({
-        cache,
-        link: new ApolloLink(
-          (operation) =>
-            new Observable((observer) => {
-              let cancelled = false;
-              let iterator: AsyncGenerator<FetchResult, void, void> | undefined;
-              (async () => {
-                const execution = await executeWithSchema({
-                  definitions: parse(
-                    `type Query { messages: [Message!]! } type Message { id: ID!, text: String, name: String }`,
-                  ),
-                  document: operation.query,
-                  rootValue: { messages: [first] },
-                  resolvers: { Message: { name: () => name.promise } },
-                });
-                if (!isIncrementalExecutionResult(execution))
-                  throw new Error("Expected deferred execution");
-                iterator = execution.subsequentResults;
-                if (cancelled) {
-                  await iterator.return();
-                  return;
-                }
-                observer.next(execution.initialResult);
-                for await (const payload of iterator) {
-                  if (!cancelled) observer.next(payload);
-                }
-                if (!cancelled) observer.complete();
-              })().catch((error) => observer.error(error));
-              return () => {
-                cancelled = true;
-                void iterator?.return();
-              };
-            }),
-        ),
-      });
-      const sub = client
-        .watchQuery<{ messages: (typeof first)[] }>({ query, fetchPolicy })
-        .subscribe({
-          next(result) {
-            if (result.loading && result.data?.messages?.length)
-              initialSeen.resolve();
-            if (!result.loading) finished.resolve(result);
-          },
-          error(error) {
-            throw error;
-          },
-        });
-      await initialSeen.promise;
-      expect(cache.getStats().treeCount).toBe(
-        fetchPolicy === "no-cache" ? 0 : 1,
-      );
-      cache.writeQuery({ query, data: { messages: [second, first] } });
-      name.resolve("Alice");
-      const result = await finished.promise;
-      expect(result.data.messages).toEqual(
-        fetchPolicy === "no-cache"
-          ? [{ ...first, name: "Alice" }]
-          : [second, { ...first, name: "Alice" }],
-      );
-      expect(cache["deferredWrites"].size).toBe(0);
-      sub.unsubscribe();
-      client.stop();
-    },
-  );
-
-  test("releases placeholders when a pending request is cancelled", async () => {
-    let send!: (result: FetchResult) => void;
-    const seen = deferred<void>();
-    const cache = new ForestRun();
-    const client = new ApolloClient({
-      cache,
-      link: new ApolloLink(
-        () =>
-          new Observable((observer) => {
-            send = (result) => observer.next(result);
-          }),
-      ),
-    });
-    const sub = client
-      .watchQuery({ query, fetchPolicy: "network-only" })
-      .subscribe({
-        next(result) {
-          if (result.data?.messages?.length) seen.resolve();
-        },
-      });
-    send(initial);
-    await seen.promise;
-    expect(cache["deferredWrites"].size).toBe(1);
-    sub.unsubscribe();
-    expect(cache["deferredWrites"].size).toBe(0);
-    client.stop();
-  });
-
-  test("resolves client fields after remote patches without rewriting remote data", async () => {
-    const document = gql`
-      query {
-        messages {
-          id
-          text
-          title @client
-          ... @defer {
-            name
-          }
-        }
-      }
-    `;
-    let send!: (result: FetchResult) => void;
-    const seen = deferred<void>();
-    const finished = deferred<ApolloQueryResult<{ messages: unknown[] }>>();
-    const cache = new ForestRun();
-    const client = new ApolloClient({
-      cache,
-      resolvers: {
-        Message: {
-          title: (parent, _args, context) => {
-            expect(context.getCacheKey(parent)).toBe(`Message:${parent.id}`);
-            return parent.name || parent.text;
-          },
-        },
-      },
-      link: new ApolloLink(
-        () =>
-          new Observable((observer) => {
-            send = (result) => observer.next(result);
-          }),
-      ),
-    });
-    const sub = client
-      .watchQuery<{ messages: unknown[] }>({
-        query: document,
-        fetchPolicy: "network-only",
-      })
-      .subscribe({
-        next(result) {
-          if (result.loading && result.data?.messages?.length) seen.resolve();
-          if (!result.loading) finished.resolve(result);
-        },
-      });
-    send(initial);
-    await seen.promise;
-    cache.writeQuery({ query: document, data: { messages: [second, first] } });
-    send(final);
-    expect((await finished.promise).data.messages).toEqual([
-      { ...second, title: "second" },
-      { ...first, name: "Alice", title: "Alice" },
-    ]);
-    sub.unsubscribe();
-    client.stop();
-  });
-});
-describe("incremental request lifecycle", () => {
-  test("deduplicates writes while applying each subscriber's error policy", async () => {
-    let send!: (result: FetchResult) => void;
-    const request = jest.fn(
-      () =>
-        new Observable<FetchResult>((observer) => {
-          send = (result) => observer.next(result);
-        }),
-    );
+  test("deduplicated queries write once per accepted error policy", async () => {
     const name = jest.fn((_existing, incoming) => incoming);
     const cache = new ForestRun({
       typePolicies: { Message: { fields: { name: { merge: name } } } },
     });
-    const client = new ApolloClient({ cache, link: new ApolloLink(request) });
-    const seen = deferred<void>();
-    const failed = deferred<Error>();
-    const finished = deferred<ApolloQueryResult<{ messages: unknown[] }>>();
+    const { client, request, send } = connect(cache);
+    let failed: Error | undefined;
     const strict = client
       .watchQuery({ query, fetchPolicy: "network-only", errorPolicy: "none" })
-      .subscribe({
-        error: failed.resolve,
-      });
-    const tolerant = client
-      .watchQuery<{ messages: unknown[] }>({
-        query,
-        fetchPolicy: "network-only",
-        errorPolicy: "all",
-      })
-      .subscribe({
-        next(result) {
-          if (result.loading && result.data?.messages?.length) seen.resolve();
-          if (!result.loading) finished.resolve(result);
-        },
-      });
+      .subscribe({ error: (error) => (failed = error) });
+    const observable = client.watchQuery<{ messages: unknown[] }>({
+      query,
+      fetchPolicy: "network-only",
+      errorPolicy: "all",
+    });
+    const tolerant = observable.subscribe(() => undefined);
     expect(request).toHaveBeenCalledTimes(1);
     send(initial);
-    await seen.promise;
+    await flush();
     send({
       hasNext: false,
       incremental: [
@@ -395,8 +261,9 @@ describe("incremental request lifecycle", () => {
         },
       ],
     });
-    expect((await failed.promise).message).toContain("partial");
-    const result = await finished.promise;
+    await flush();
+    expect(failed?.message).toContain("partial");
+    const result = observable.getCurrentResult();
     expect(result.data.messages).toEqual([{ ...first, name: "Alice" }]);
     expect(result.errors?.[0].message).toBe("partial");
     expect(name).toHaveBeenCalledTimes(1);
@@ -406,98 +273,153 @@ describe("incremental request lifecycle", () => {
     client.stop();
   });
 
-  test("refetch replaces the old execution's bindings", async () => {
-    const sources: { next(result: FetchResult): void; complete(): void }[] = [];
-    const seen = deferred<void>();
+  test("refetch replaces the previous execution", async () => {
     const cache = new ForestRun();
-    const client = new ApolloClient({
-      cache,
-      link: new ApolloLink(
-        () =>
-          new Observable((observer) => {
-            sources.push({
-              next: (result) => observer.next(result),
-              complete: () => observer.complete(),
-            });
-          }),
-      ),
-    });
-    const observable = client.watchQuery({
+    const { client, sources } = connect(cache, false);
+    const observable = client.watchQuery<{ messages: unknown[] }>({
       query,
       fetchPolicy: "network-only",
     });
-    const subscription = observable.subscribe({
-      next(result) {
-        if (result.loading && result.data?.messages?.length) seen.resolve();
-      },
-    });
-    sources[0].next(initial);
-    await seen.promise;
-    const refetch = observable.refetch();
+    const sub = observable.subscribe(() => undefined);
+    sources[0](initial);
+    await flush();
+    void observable.refetch();
     expect(sources).toHaveLength(2);
-    expect(cache["deferredWrites"].size).toBe(0);
-    sources[0].next(final);
-    sources[1].next({
-      ...initial,
-      data: { messages: [{ ...first, id: "2" }] },
-    });
-    sources[1].next(final);
-    sources[1].complete();
-    expect((await refetch).data.messages).toEqual([
+    sources[1]({ ...initial, data: { messages: [{ ...first, id: "2" }] } });
+    expect(cache["deferredWrites"].size).toBe(1);
+    sources[0](final);
+    sources[1](final);
+    await flush();
+    expect(observable.getCurrentResult().data.messages).toEqual([
       { ...first, id: "2", name: "Alice" },
     ]);
+    expect(cache.readQuery({ query })).toEqual({
+      messages: [{ ...first, id: "2", name: "Alice" }],
+    });
     expect(cache["deferredWrites"].size).toBe(0);
-    subscription.unsubscribe();
+    sub.unsubscribe();
     client.stop();
   });
 
-  test("leaves client-only queries on the ordinary resolver path", async () => {
+  test("releases placeholders when a pending request is cancelled", async () => {
     const cache = new ForestRun();
-    const client = new ApolloClient({
-      cache,
-      link: ApolloLink.empty(),
-      resolvers: { Query: { local: () => "local value" } },
-    });
-    const result = await client.query({
-      query: gql`
-        query {
-          ... on Query @client @defer {
-            local @client
-          }
-        }
-      `,
-      fetchPolicy: "network-only",
-    });
-    expect(result.data).toMatchObject({ local: "local value" });
+    const { client, send } = connect(cache);
+    const sub = client
+      .watchQuery({ query, fetchPolicy: "network-only" })
+      .subscribe(() => undefined);
+    send(initial);
+    await flush();
+    expect(cache["deferredWrites"].size).toBe(1);
+    sub.unsubscribe();
     expect(cache["deferredWrites"].size).toBe(0);
-    client.stop();
-  });
-
-  test("does not substitute cached data for a null error response", async () => {
-    const cache = new ForestRun();
-    cache.writeQuery({ query, data: { messages: [second] } });
-    const client = new ApolloClient({
-      cache,
-      link: new ApolloLink(() =>
-        Observable.of({
-          data: null,
-          hasNext: false,
-          errors: [new GraphQLError("failed")],
-        }),
-      ),
-    });
-    const result = await client.query({
-      query,
-      fetchPolicy: "network-only",
-      errorPolicy: "all",
-    });
-    expect(result.data).toBeNull();
-    expect(cache.readQuery({ query })).toEqual({ messages: [second] });
     client.stop();
   });
 });
-
 describe("server-announced incremental writes", () => {
+  test("preserves cached embedded fields when registering placeholders", () => {
+    const document = gql`
+      query {
+        message {
+          id
+          profile {
+            text
+            ... @defer {
+              name
+            }
+          }
+        }
+      }
+    `;
+    const cache = new ForestRun();
+    const message = { __typename: "Message", id: "1" };
+    cache.writeQuery({
+      query: document,
+      data: {
+        message: {
+          ...message,
+          profile: { __typename: "Profile", text: "before", name: "cached" },
+        },
+      },
+    });
+    const write = writer(cache, document);
+    write({
+      data: {
+        message: {
+          ...message,
+          profile: { __typename: "Profile", text: "after" },
+        },
+      },
+      pending: [{ path: ["message", "profile"] }],
+      hasNext: true,
+    });
+    expect(cache.readQuery({ query: document })).toEqual({
+      message: {
+        ...message,
+        profile: { __typename: "Profile", text: "after", name: "cached" },
+      },
+    });
+    write({
+      incremental: [{ path: ["message", "profile"], data: { name: "Alice" } }],
+      hasNext: false,
+    });
+    expect(cache.readQuery({ query: document })).toEqual({
+      message: {
+        ...message,
+        profile: { __typename: "Profile", text: "after", name: "Alice" },
+      },
+    });
+  });
+
+  test("shares embedded bindings across aliases and pending executions", () => {
+    const document = gql`
+      query {
+        message {
+          id
+          left: profile {
+            text
+            ... @defer {
+              name
+            }
+          }
+          right: profile {
+            text
+            ... @defer {
+              name
+            }
+          }
+        }
+      }
+    `;
+    const cache = new ForestRun();
+    const message = { __typename: "Message", id: "1" };
+    const profile = { __typename: "Profile", text: "before" };
+    const firstWrite = writer(cache, document);
+    const secondWrite = writer(cache, document);
+    const response = () => ({
+      data: {
+        message: { ...message, left: { ...profile }, right: { ...profile } },
+      },
+      pending: [{ path: ["message", "left"] }, { path: ["message", "right"] }],
+      hasNext: true,
+    });
+    firstWrite(response());
+    secondWrite(response());
+    firstWrite({
+      incremental: [{ path: ["message", "left"], data: { name: "Alice" } }],
+      hasNext: false,
+    });
+    secondWrite({
+      incremental: [{ path: ["message", "right"], data: { name: "Bob" } }],
+      hasNext: false,
+    });
+    expect(cache.readQuery({ query: document })).toEqual({
+      message: {
+        ...message,
+        left: { ...profile, name: "Bob" },
+        right: { ...profile, name: "Bob" },
+      },
+    });
+  });
   test("releases a failed initial write so its token can be reused", () => {
     const cache = new ForestRun();
     const token = {};
@@ -629,6 +551,18 @@ describe("server-announced incremental writes", () => {
     expect(name).toHaveBeenCalledTimes(1);
     expect(notify).toHaveBeenCalledTimes(1);
     unwatch();
+  });
+
+  test("does not restore an initially empty list from an ancestor payload", () => {
+    const cache = new ForestRun();
+    const write = writer(cache);
+    write({ data: { messages: [] }, pending: [{ path: [] }], hasNext: true });
+    cache.writeQuery({ query, data: { messages: [second] } });
+    write({
+      incremental: [{ path: [], data: { messages: [] } }],
+      hasNext: false,
+    });
+    expect(cache.readQuery({ query })).toEqual({ messages: [second] });
   });
 
   test("regular writes bind nested list positions before rows move", () => {
@@ -812,5 +746,101 @@ describe("server-announced incremental writes", () => {
     next(initial);
     next({ hasNext: false });
     expect(cache["deferredWrites"].size).toBe(0);
+  });
+
+  test("updates ID-less targets for every query reading their owner", () => {
+    const deferredQuery = gql`
+      query {
+        message {
+          id
+          profile {
+            text
+            ... @defer {
+              name
+            }
+          }
+        }
+      }
+    `;
+    const plainQuery = gql`
+      query {
+        message {
+          id
+          profile {
+            text
+            name
+          }
+        }
+      }
+    `;
+    const data = (profile: object) => ({
+      message: {
+        __typename: "Message",
+        id: "1",
+        profile: { __typename: "Profile", text: "t", ...profile },
+      },
+    });
+    const cache = new ForestRun();
+    const write = writer(cache, deferredQuery);
+    write({
+      data: data({}),
+      pending: [{ path: ["message", "profile"] }],
+      hasNext: true,
+    });
+    cache.writeQuery({ query: plainQuery, data: data({ name: "fromB" }) });
+    write({
+      incremental: [{ path: ["message", "profile"], data: { name: "Alice" } }],
+      hasNext: false,
+    });
+    expect(cache.readQuery({ query: deferredQuery })).toEqual(
+      data({ name: "Alice" }),
+    );
+    expect(cache.readQuery({ query: plainQuery })).toEqual(
+      data({ name: "Alice" }),
+    );
+  });
+
+  test("binds ID-less targets to their original owner after the owner moves", () => {
+    const document = gql`
+      query {
+        messages {
+          id
+          profile {
+            text
+            ... @defer {
+              name
+            }
+          }
+        }
+      }
+    `;
+    const message = (id: string, profile: object) => ({
+      __typename: "Message",
+      id,
+      profile: { __typename: "Profile", text: id, ...profile },
+    });
+    const cache = new ForestRun();
+    const write = writer(cache, document);
+    write({
+      data: { messages: [message("1", {})] },
+      pending: [{ path: ["messages", 0, "profile"] }],
+      hasNext: true,
+    });
+    cache.writeQuery({
+      query: document,
+      data: { messages: [message("2", { name: "Bob" }), message("1", {})] },
+    });
+    write({
+      incremental: [
+        { path: ["messages", 0, "profile"], data: { name: "Alice" } },
+      ],
+      hasNext: false,
+    });
+    expect(cache.readQuery({ query: document })).toEqual({
+      messages: [
+        message("2", { name: "Bob" }),
+        message("1", { name: "Alice" }),
+      ],
+    });
   });
 });

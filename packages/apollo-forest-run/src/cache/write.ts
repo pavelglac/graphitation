@@ -4,6 +4,7 @@ import type {
   UpdateTreeResult,
 } from "../forest/types";
 import type { OperationResult } from "../values/types";
+
 import type {
   CacheEnv,
   DataForest,
@@ -37,6 +38,7 @@ import {
 } from "../forest/updateForest";
 import { indexTree } from "../forest/indexTree";
 import { createParentLocator, markAsPartial, TraverseEnv } from "../values";
+
 import { NodeDifferenceMap } from "../forest/updateTree";
 import { getNodeChunks } from "./draftHelpers";
 import { replaceTree } from "../forest/addTree";
@@ -70,25 +72,29 @@ export function write(
       return;
     }
     assert(placeholder, "Deferred path does not identify an original target");
-    // Delivered relationships locate child placeholders, but must not restore old list layouts.
+    // Bound child paths route patches without restoring old relationships or list layouts.
     const data: Record<string, unknown> = Object.create(null);
     let hasFields = false;
     for (const field of Object.keys(writeData)) {
-      if (!placeholder.delivered.has(field)) {
+      if (deferred.has([...options.defer.path, field].join("."))) {
+        writeChild(writeData[field], field);
+      } else {
         data[field] = writeData[field];
         hasFields = true;
-      } else if (placeholder.delivered.get(field)) {
-        writeChild(writeData[field], field);
       }
     }
     if (
       !hasFields ||
-      targetForest.deletedNodes.has(placeholder.owner) ||
+      targetForest.deletedNodes.has(placeholder.key) ||
       getNodeChunks([targetForest], placeholder.key).next().done
     )
       return;
-    data.__typename = placeholder.type;
-    writeData = data;
+    const ownerData = placeholder.path.length
+      ? embedInOwner(targetForest, placeholder, data)
+      : data;
+    if (!ownerData) return;
+    ownerData.__typename = placeholder.type;
+    writeData = ownerData;
   }
   const rootNodeKey =
     placeholder?.key ?? options.dataId ?? objectKey(writeData);
@@ -298,6 +304,44 @@ export function write(
     );
     if (child) activeTransaction.changelog.push(child);
   }
+}
+
+// Writes an ID-less deferred target as a sparse nested write to its keyed owner. Like Apollo,
+// positions below the owner are resolved against its current data in the original operation.
+function embedInOwner(
+  forest: IndexedForest,
+  placeholder: NonNullable<ReturnType<DeferredPlaceholders["get"]>>,
+  data: Record<string, unknown>,
+): Record<string, unknown> | undefined {
+  const { path } = placeholder;
+  const embed = (source: Record<string, unknown>, depth: number): unknown => {
+    if (depth === path.length) {
+      return source.__typename === undefined
+        ? data
+        : { ...data, __typename: source.__typename };
+    }
+    const part = path[depth];
+    const child = source[part];
+    const value =
+      child && typeof child === "object"
+        ? embed(child as Record<string, unknown>, depth + 1)
+        : undefined;
+    if (value === undefined) return undefined;
+    if (Array.isArray(source)) {
+      const list = source.slice();
+      list[part as number] = value;
+      return list;
+    }
+    return source.__typename === undefined
+      ? { [part]: value }
+      : { __typename: source.__typename, [part]: value };
+  };
+  const tree = forest.trees.get(placeholder.operation.id);
+  for (const owner of tree?.nodes.get(placeholder.key) ?? EMPTY_ARRAY) {
+    const result = embed(owner.data as Record<string, unknown>, 0);
+    if (result) return result as Record<string, unknown>;
+  }
+  return undefined;
 }
 
 function appendAffectedOperationsFromOtherLayers(
