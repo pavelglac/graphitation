@@ -17,7 +17,9 @@ import type {
   SerializedOperationInfo,
   Store,
   Transaction,
+  WriteOptions,
 } from "./cache/types";
+import type { DeferredPlaceholders } from "./forest/types";
 import { ApolloCache } from "@apollo/client";
 import { assert } from "./jsutils/assert";
 import { accumulate, deleteAccumulated } from "./jsutils/map";
@@ -113,6 +115,7 @@ export class ForestRun<
 
   protected invalidatedDiffs = new WeakSet<Cache.DiffResult<any>>();
   protected extractedObjects = new WeakMap<any, SerializedOperationInfo>();
+  private deferredWrites = new Map<object, DeferredPlaceholders>();
 
   public constructor(public config?: CacheConfig<TPartitions>) {
     super();
@@ -199,7 +202,7 @@ export class ForestRun<
     return result.dirty;
   }
 
-  public write(options: Cache.WriteOptions): Reference | undefined {
+  public write(options: WriteOptions): Reference | undefined {
     return this.transactionStack.length
       ? this.runWrite(options)
       : this.runTransaction({
@@ -207,10 +210,19 @@ export class ForestRun<
         });
   }
 
-  private runWrite(options: Cache.WriteOptions): Reference | undefined {
+  public releaseIncremental(token: object): void {
+    this.deferredWrites.delete(token);
+  }
+
+  private runWrite(options: WriteOptions): Reference | undefined {
     const transaction = peek(this.transactionStack);
     assert(transaction);
-    const result = write(this.env, this.store, transaction, options);
+    const token = options.defer?.token;
+    if (token && !options.defer?.path)
+      this.deferredWrites.set(token, new Map());
+    const deferred = token && this.deferredWrites.get(token);
+    const result = write(this.env, this.store, transaction, options, deferred);
+    if (!result) return;
     transaction.changelog.push(result);
 
     const incoming = result.incoming;
@@ -492,6 +504,7 @@ export class ForestRun<
   }
 
   public reset(options?: Cache.ResetOptions): Promise<void> {
+    this.deferredWrites.clear();
     resetStore(this.store);
 
     if (options?.discardWatches) {

@@ -64,6 +64,18 @@ export type IndexedTree = {
   danglingReferences?: Set<NodeKey>;
 };
 
+// Deferred response paths bound to their nearest keyed owner and the path below it.
+export type DeferredPlaceholders = Map<
+  string,
+  {
+    key: NodeKey;
+    type: TypeName;
+    operation: OperationDescriptor;
+    selection: PossibleSelections;
+    path: (string | number)[];
+  }
+>;
+
 export type HistoryFieldChange =
   | FillerChange
   | ReplacementChange

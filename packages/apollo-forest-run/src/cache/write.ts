@@ -1,6 +1,15 @@
-import type { Cache } from "@apollo/client";
-import type { IndexedTree, UpdateTreeResult } from "../forest/types";
-import type { OperationResult } from "../values/types";
+import type {
+  DeferredPlaceholders,
+  IndexedTree,
+  UpdateTreeResult,
+} from "../forest/types";
+import type {
+  CompositeListChunk,
+  ObjectChunk,
+  OperationResult,
+  SourceObject,
+} from "../values/types";
+import { ValueKind } from "../values/types";
 import type {
   CacheEnv,
   DataForest,
@@ -10,6 +19,7 @@ import type {
   Store,
   Transaction,
   WriteResult,
+  WriteOptions,
 } from "./types";
 import type { NodeKey, OperationDescriptor } from "../descriptor/types";
 import { assert } from "../jsutils/assert";
@@ -43,15 +53,30 @@ export function write(
   env: CacheEnv,
   store: Store,
   activeTransaction: Transaction,
-  options: Cache.WriteOptions,
-): WriteResult {
+  options: WriteOptions,
+  deferred?: DeferredPlaceholders,
+): WriteResult | undefined {
   const { mergePolicies, objectKey, addTypename, keyMap } = env;
   const targetForest = getActiveForest(store, activeTransaction);
 
-  const writeData =
+  let writeData =
     typeof options.result === "object" && options.result !== null
       ? options.result
       : {};
+  const placeholder =
+    options.defer?.path && deferred?.get(options.defer.path.join("."));
+  if (options.defer?.path) {
+    // Released or reset executions have no targets left to update.
+    if (!deferred) return;
+    assert(placeholder, "Deferred path does not identify an original target");
+    if (getNodeChunks([targetForest], placeholder.key).next().done) return;
+    const ownerData = placeholder.path.length
+      ? embedInOwner(targetForest, placeholder, writeData)
+      : writeData;
+    if (!ownerData) return;
+    writeData = ownerData;
+    options = { ...options, dataId: placeholder.key };
+  }
   const rootNodeKey = options.dataId ?? objectKey(writeData);
   assert(rootNodeKey !== false);
 
@@ -59,15 +84,23 @@ export function write(
   if (rootNodeKey !== undefined && options.dataId) {
     keyMap?.set(writeData, rootNodeKey);
   }
-  const operationDescriptor = resolveOperationDescriptor(
-    env,
-    store,
-    options.query,
-    options.variables,
-    rootNodeKey,
-  );
+  const operationDescriptor = placeholder
+    ? {
+        ...placeholder.operation,
+        rootNodeKey: placeholder.key,
+        rootType: placeholder.type,
+        possibleSelections: placeholder.selection,
+        cache: false,
+      }
+    : resolveOperationDescriptor(
+        env,
+        store,
+        options.query,
+        options.variables,
+        rootNodeKey,
+      );
   touchOperation(env, store, operationDescriptor);
-  if (!operationDescriptor.cache) {
+  if (!placeholder && !operationDescriptor.cache) {
     // Results of this operation are never stored, so nothing will ever evict its descriptor.
     // Remember it, so that the outermost transaction can release it on completion.
     // (the set only exists when `env.cleanupNonCacheableOperations` is enabled)
@@ -82,18 +115,16 @@ export function write(
     throw new Error(`Could not identify object ${inspect(writeData)}`);
   }
 
-  let existingResult = getExistingResult(
-    env,
-    store,
-    targetForest,
-    operationDescriptor,
-  );
+  let existingResult = placeholder
+    ? undefined
+    : getExistingResult(env, store, targetForest, operationDescriptor);
   const existingData = existingResult?.result.data;
 
   // Safeguard: make sure previous state doesn't leak outside write operation
   assert(!existingResult?.prev);
 
-  if (writeData === existingData && existingResult) {
+  const pending = options.defer?.pending?.length ? deferred : undefined;
+  if (writeData === existingData && existingResult && !pending) {
     return {
       options,
       incoming: existingResult,
@@ -104,7 +135,7 @@ export function write(
     };
   }
 
-  if (!ROOT_NODES.includes(operationDescriptor.rootNodeKey)) {
+  if (!placeholder && !ROOT_NODES.includes(operationDescriptor.rootNodeKey)) {
     const typeName = resolveExtraRootNodeType(
       env,
       store,
@@ -127,7 +158,9 @@ export function write(
     operationResult,
     undefined,
     existingResult,
+    !!pending,
   );
+  if (pending) registerPlaceholders(incomingResult, options, pending);
 
   // ApolloCompat: necessary for fragment writes with custom ids
   if (options.dataId && incomingResult.rootNodeKey !== options.dataId) {
@@ -216,6 +249,80 @@ export function write(
     affectedNodes: aggregateAllAffectedNodes(difference, allUpdates),
     updateStats: allUpdates.map((update) => update.stats ?? null),
   };
+}
+
+// Binds each pending path to its nearest keyed object (owner) and the path below it.
+function registerPlaceholders(
+  tree: IndexedTree,
+  options: WriteOptions,
+  placeholders: DeferredPlaceholders,
+) {
+  for (const { path } of options.defer?.pending ?? EMPTY_ARRAY) {
+    let source = tree.result.data as Record<string, unknown> | undefined;
+    let owner;
+    let ownerPath: (string | number)[] = [];
+    for (let depth = 0; source && typeof source === "object"; depth++) {
+      const chunk = tree.dataMap.get(source as SourceObject)?.value as
+        | ObjectChunk
+        | CompositeListChunk
+        | undefined;
+      if (chunk?.kind === ValueKind.Object && chunk.key !== false) {
+        const type = chunk.type || (!depth && tree.operation.rootType);
+        assert(type, "Deferred owners must include __typename");
+        owner = { key: chunk.key, type, selection: chunk.possibleSelections };
+        ownerPath = [];
+      }
+      if (depth === path.length) {
+        assert(owner);
+        placeholders.set(path.join("."), {
+          ...owner,
+          operation: tree.operation,
+          path: ownerPath,
+        });
+        break;
+      }
+      ownerPath.push(path[depth]);
+      source = source[path[depth]] as Record<string, unknown> | undefined;
+    }
+  }
+}
+
+// Writes an ID-less deferred target as a sparse nested write to its keyed owner. Like Apollo,
+// positions below the owner are resolved against its current data in the original operation.
+function embedInOwner(
+  forest: IndexedForest,
+  placeholder: NonNullable<ReturnType<DeferredPlaceholders["get"]>>,
+  data: Record<string, unknown>,
+): Record<string, unknown> | undefined {
+  const { path } = placeholder;
+  const embed = (source: Record<string, unknown>, depth: number): unknown => {
+    if (depth === path.length) {
+      return source.__typename === undefined
+        ? data
+        : { ...data, __typename: source.__typename };
+    }
+    const part = path[depth];
+    const child = source[part];
+    const value =
+      child && typeof child === "object"
+        ? embed(child as Record<string, unknown>, depth + 1)
+        : undefined;
+    if (value === undefined) return undefined;
+    if (Array.isArray(source)) {
+      const list = source.slice();
+      list[part as number] = value;
+      return list;
+    }
+    return source.__typename === undefined
+      ? { [part]: value }
+      : { __typename: source.__typename, [part]: value };
+  };
+  const tree = forest.trees.get(placeholder.operation.id);
+  for (const owner of tree?.nodes.get(placeholder.key) ?? EMPTY_ARRAY) {
+    const result = embed(owner.data as Record<string, unknown>, 0);
+    if (result) return result as Record<string, unknown>;
+  }
+  return undefined;
 }
 
 function appendAffectedOperationsFromOtherLayers(
