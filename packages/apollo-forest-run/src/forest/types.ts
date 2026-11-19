@@ -64,8 +64,7 @@ export type IndexedTree = {
   danglingReferences?: Set<NodeKey>;
 };
 
-// Deferred response paths bound to their nearest keyed owner and the path below it
-// (`null` marks lists that only route ancestor patches).
+// Deferred response paths bound to their nearest keyed owner and the path below it.
 export type DeferredPlaceholders = Map<
   string,
   {
@@ -74,7 +73,7 @@ export type DeferredPlaceholders = Map<
     operation: OperationDescriptor;
     selection: PossibleSelections;
     path: (string | number)[];
-  } | null
+  }
 >;
 
 export type DeferredWriteContext = {

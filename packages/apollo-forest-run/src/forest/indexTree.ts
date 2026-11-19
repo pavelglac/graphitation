@@ -326,19 +326,22 @@ function indexSourceObject(
     missingFields,
   );
   if (context.deferred && position) {
-    position.active ||= context.deferred.pending.has(position.path);
+    const isPending = context.deferred.pending.has(position.path);
+    position.active ||= isPending;
     if (key !== false) {
       assert(typeName, "Deferred owners must include __typename");
       position.owner = { key, type: typeName, selection: possibleSelections };
       position.ownerPath = [];
     }
     if (position.active) {
-      assert(position.owner);
       for (const field of chunk.selection.fieldQueue) {
         if (source[field.dataKey] === undefined) {
           (chunk.missingFields ??= new Set()).add(field);
         }
       }
+    }
+    if (isPending) {
+      assert(position.owner);
       context.deferred.placeholders.set(position.path, {
         ...position.owner,
         operation: op,
@@ -442,9 +445,6 @@ function indexSourceList(
   parent: GraphChunkReference,
   position?: DeferredPosition,
 ) {
-  if (context.deferred && position?.active) {
-    context.deferred.placeholders.set(position.path, null);
-  }
   const recycleTree = context.recycleTree;
   const recyclable =
     recycleTree?.dataMap.get(list) ?? recycleTree?.prev?.dataMap.get(list);

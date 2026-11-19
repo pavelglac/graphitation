@@ -472,58 +472,6 @@ describe("server-announced incremental writes", () => {
     },
   );
 
-  test("binds an absolute patch path below a pending fragment to its original target", () => {
-    const cache = new ForestRun();
-    const write = writer(cache);
-    write({ ...initial, pending: [{ path: [] }] });
-    cache.writeQuery({ query, data: { messages: [second, first] } });
-    write(final);
-    expect(cache.readQuery({ query })).toEqual({
-      messages: [second, { ...first, name: "Alice" }],
-    });
-  });
-
-  test("does not rewrite relationships or rerun their merge policies for ancestor payloads", () => {
-    const messages = jest.fn((_existing, incoming) => incoming);
-    const name = jest.fn((_existing, incoming) => incoming);
-    const cache = new ForestRun({
-      typePolicies: {
-        Query: { fields: { messages: { merge: messages } } },
-        Message: { fields: { name: { merge: name } } },
-      },
-    });
-    const write = writer(cache);
-    write({ ...initial, pending: [{ path: [] }] });
-    cache.writeQuery({ query, data: { messages: [second, first] } });
-    const notify = jest.fn();
-    const unwatch = cache.watch({ query, optimistic: false, callback: notify });
-    messages.mockClear();
-    name.mockClear();
-    write({
-      ...final,
-      incremental: [{ path: [], data: { messages: [{ name: "Alice" }] } }],
-    });
-    expect(cache.readQuery({ query })).toEqual({
-      messages: [second, { ...first, name: "Alice" }],
-    });
-    expect(messages).not.toHaveBeenCalled();
-    expect(name).toHaveBeenCalledTimes(1);
-    expect(notify).toHaveBeenCalledTimes(1);
-    unwatch();
-  });
-
-  test("does not restore an initially empty list from an ancestor payload", () => {
-    const cache = new ForestRun();
-    const write = writer(cache);
-    write({ data: { messages: [] }, pending: [{ path: [] }], hasNext: true });
-    cache.writeQuery({ query, data: { messages: [second] } });
-    write({
-      incremental: [{ path: [], data: { messages: [] } }],
-      hasNext: false,
-    });
-    expect(cache.readQuery({ query })).toEqual({ messages: [second] });
-  });
-
   test("regular writes bind nested list positions before rows move", () => {
     const document = gql`
       query {

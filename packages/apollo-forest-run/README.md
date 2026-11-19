@@ -25,8 +25,10 @@ resolved against its current data, as in Apollo. Patches for evicted owners are
 skipped. Placeholders are released when the execution finishes, the cache is
 reset, or a deferred write throws.
 
-Only object-data patches for paths announced in `pending` are supported. Nested
-`@defer` targets introduced by patches and `@stream` are not implemented.
+Only object-data patches for paths announced in `pending` are supported. Objects
+re-selected inside a deferred fragment must select their key fields, as for any
+other write. Nested `@defer` targets introduced by patches and `@stream` are not
+implemented.
 
 # Motivation
 

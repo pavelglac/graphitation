@@ -60,31 +60,11 @@ export function write(
   const placeholder =
     options.defer?.path && deferred?.get(options.defer.path.join("."));
   if (options.defer?.path) {
-    assert(deferred, "Unknown deferred execution");
-    if (Array.isArray(writeData)) {
-      writeData.forEach(writeChild);
-      return;
-    }
     assert(placeholder, "Deferred path does not identify an original target");
-    // Bound child paths route patches without restoring old relationships or list layouts.
-    const data: Record<string, unknown> = Object.create(null);
-    let hasFields = false;
-    for (const field of Object.keys(writeData)) {
-      if (deferred.has([...options.defer.path, field].join("."))) {
-        writeChild(writeData[field], field);
-      } else {
-        data[field] = writeData[field];
-        hasFields = true;
-      }
-    }
-    if (
-      !hasFields ||
-      getNodeChunks([targetForest], placeholder.key).next().done
-    )
-      return;
+    if (getNodeChunks([targetForest], placeholder.key).next().done) return;
     const ownerData = placeholder.path.length
-      ? embedInOwner(targetForest, placeholder, data)
-      : data;
+      ? embedInOwner(targetForest, placeholder, writeData)
+      : { ...writeData };
     if (!ownerData) return;
     ownerData.__typename = placeholder.type;
     writeData = ownerData;
@@ -270,23 +250,6 @@ export function write(
     affectedNodes: aggregateAllAffectedNodes(difference, allUpdates),
     updateStats: allUpdates.map((update) => update.stats ?? null),
   };
-
-  function writeChild(value: unknown, part: string | number) {
-    if (value === null || typeof value !== "object") return;
-    assert(options.defer?.path);
-    const child = write(
-      env,
-      store,
-      activeTransaction,
-      {
-        ...options,
-        result: value,
-        defer: { ...options.defer, path: [...options.defer.path, part] },
-      },
-      deferred,
-    );
-    if (child) activeTransaction.changelog.push(child);
-  }
 }
 
 // Writes an ID-less deferred target as a sparse nested write to its keyed owner. Like Apollo,
