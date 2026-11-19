@@ -25,7 +25,6 @@ import type {
   TypeName,
 } from "../descriptor/types";
 import type { DeferredWriteContext, ForestEnv, IndexedTree } from "./types";
-import { addTypenameToDocument } from "../descriptor/addTypenameToDocument";
 import { ValueKind } from "../values/types";
 import {
   getFieldName,
@@ -336,10 +335,7 @@ function indexSourceObject(
     if (position.active) {
       assert(position.owner);
       for (const field of chunk.selection.fieldQueue) {
-        if (
-          source[field.dataKey] === undefined &&
-          !field.__refs.every(({ node }) => addTypenameToDocument.added(node))
-        ) {
+        if (source[field.dataKey] === undefined) {
           (chunk.missingFields ??= new Set()).add(field);
         }
       }

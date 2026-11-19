@@ -155,7 +155,7 @@ export type WriteResult = {
 export type WriteOptions = Cache.WriteOptions & {
   defer?: {
     token: object;
-    pending?: readonly { path: readonly (string | number)[]; label?: string }[];
+    pending?: readonly { path: readonly (string | number)[] }[];
     path?: readonly (string | number)[];
   };
 };

@@ -61,10 +61,6 @@ export function write(
     options.defer?.path && deferred?.get(options.defer.path.join("."));
   if (options.defer?.path) {
     assert(deferred, "Unknown deferred execution");
-    assert(
-      options.result && typeof options.result === "object",
-      "Deferred patches must contain object data",
-    );
     if (Array.isArray(writeData)) {
       writeData.forEach(writeChild);
       return;
@@ -83,7 +79,6 @@ export function write(
     }
     if (
       !hasFields ||
-      targetForest.deletedNodes.has(placeholder.key) ||
       getNodeChunks([targetForest], placeholder.key).next().done
     )
       return;
@@ -93,13 +88,13 @@ export function write(
     if (!ownerData) return;
     ownerData.__typename = placeholder.type;
     writeData = ownerData;
+    options = { ...options, dataId: placeholder.key };
   }
-  const rootNodeKey =
-    placeholder?.key ?? options.dataId ?? objectKey(writeData);
+  const rootNodeKey = options.dataId ?? objectKey(writeData);
   assert(rootNodeKey !== false);
 
   // ApolloCompat (apollo allows writing fragments without proper id in the data)
-  if (rootNodeKey !== undefined && (options.dataId || placeholder)) {
+  if (rootNodeKey !== undefined && options.dataId) {
     keyMap?.set(writeData, rootNodeKey);
   }
   const operationDescriptor = placeholder
@@ -189,11 +184,7 @@ export function write(
   );
 
   // ApolloCompat: necessary for fragment writes with custom ids
-  if (
-    !placeholder &&
-    options.dataId &&
-    incomingResult.rootNodeKey !== options.dataId
-  ) {
+  if (options.dataId && incomingResult.rootNodeKey !== options.dataId) {
     const rootNode = incomingResult.nodes.get(incomingResult.rootNodeKey);
     assert(rootNode);
     incomingResult.nodes.set(options.dataId, rootNode);
