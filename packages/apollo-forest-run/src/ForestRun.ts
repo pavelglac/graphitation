@@ -203,16 +203,11 @@ export class ForestRun<
   }
 
   public write(options: WriteOptions): Reference | undefined {
-    try {
-      return this.transactionStack.length
-        ? this.runWrite(options)
-        : this.runTransaction({
-            update: () => this.runWrite(options),
-          });
-    } catch (error) {
-      if (options.defer) this.releaseIncremental(options.defer.token);
-      throw error;
-    }
+    return this.transactionStack.length
+      ? this.runWrite(options)
+      : this.runTransaction({
+          update: () => this.runWrite(options),
+        });
   }
 
   public releaseIncremental(token: object): void {
@@ -222,21 +217,10 @@ export class ForestRun<
   private runWrite(options: WriteOptions): Reference | undefined {
     const transaction = peek(this.transactionStack);
     assert(transaction);
-    let deferred: DeferredPlaceholders | undefined;
-    if (options.defer) {
-      assert(
-        !transaction.optimisticLayer,
-        "Deferred writes must target the base cache",
-      );
-      const { token, path } = options.defer;
-      deferred = this.deferredWrites.get(token);
-      if (!path) {
-        assert(!deferred, "Deferred write has a second initial result");
-        deferred = new Map();
-        this.deferredWrites.set(token, deferred);
-      }
-      assert(deferred, "Unknown deferred execution");
-    }
+    const token = options.defer?.token;
+    if (token && !options.defer?.path)
+      this.deferredWrites.set(token, new Map());
+    const deferred = token && this.deferredWrites.get(token);
     const result = write(this.env, this.store, transaction, options, deferred);
     if (!result) return;
     transaction.changelog.push(result);

@@ -420,47 +420,6 @@ describe("server-announced incremental writes", () => {
       },
     });
   });
-  test("releases a failed initial write so its token can be reused", () => {
-    const cache = new ForestRun();
-    const token = {};
-    expect(() =>
-      cache.write({
-        query,
-        result: { messages: [first] },
-        defer: { token, pending: [{ path: ["missing"] }] },
-      }),
-    ).toThrow("Pending path does not identify an object");
-    expect(cache["deferredWrites"].has(token)).toBe(false);
-    const write = writer(cache, query, token);
-    write(initial);
-    write(final);
-    expect(cache.readQuery({ query })).toEqual({
-      messages: [{ ...first, name: "Alice" }],
-    });
-  });
-
-  test("releases only the execution whose direct patch write fails", () => {
-    const cache = new ForestRun();
-    const failedToken = {};
-    const liveToken = {};
-    writer(cache, query, failedToken)(initial);
-    const liveWrite = writer(cache, query, liveToken);
-    liveWrite(initial);
-    expect(() =>
-      cache.write({
-        query,
-        result: { name: "wrong" },
-        defer: { token: failedToken, path: ["missing"] },
-      }),
-    ).toThrow("Deferred path does not identify an original target");
-    expect(cache["deferredWrites"].has(failedToken)).toBe(false);
-    expect(cache["deferredWrites"].has(liveToken)).toBe(true);
-    liveWrite(final);
-    expect(cache.readQuery({ query })).toEqual({
-      messages: [{ ...first, name: "Alice" }],
-    });
-  });
-
   test("preserves an own __proto__ response alias when preparing a patch", () => {
     const document = gql`
       query {

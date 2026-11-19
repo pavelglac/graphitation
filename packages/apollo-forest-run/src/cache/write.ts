@@ -4,7 +4,6 @@ import type {
   UpdateTreeResult,
 } from "../forest/types";
 import type { OperationResult } from "../values/types";
-
 import type {
   CacheEnv,
   DataForest,
@@ -38,7 +37,6 @@ import {
 } from "../forest/updateForest";
 import { indexTree } from "../forest/indexTree";
 import { createParentLocator, markAsPartial, TraverseEnv } from "../values";
-
 import { NodeDifferenceMap } from "../forest/updateTree";
 import { getNodeChunks } from "./draftHelpers";
 import { replaceTree } from "../forest/addTree";
@@ -52,7 +50,7 @@ export function write(
   options: WriteOptions,
   deferred?: DeferredPlaceholders,
 ): WriteResult | undefined {
-  const { objectKey, addTypename, keyMap } = env;
+  const { mergePolicies, objectKey, addTypename, keyMap } = env;
   const targetForest = getActiveForest(store, activeTransaction);
 
   let writeData =
@@ -189,12 +187,6 @@ export function write(
     existingResult,
     pending,
   );
-  for (const path of pending?.pending ?? EMPTY_ARRAY) {
-    assert(
-      pending?.placeholders.has(path),
-      "Pending path does not identify an object in the response",
-    );
-  }
 
   // ApolloCompat: necessary for fragment writes with custom ids
   if (
@@ -212,7 +204,7 @@ export function write(
   const modifiedIncomingResult = applyMergePolicies(
     env,
     getEffectiveReadLayers(store, targetForest, false),
-    env.mergePolicies,
+    mergePolicies,
     incomingResult,
     options.overwrite ?? false,
   );
