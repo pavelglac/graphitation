@@ -64,9 +64,8 @@ export function write(
     if (getNodeChunks([targetForest], placeholder.key).next().done) return;
     const ownerData = placeholder.path.length
       ? embedInOwner(targetForest, placeholder, writeData)
-      : { ...writeData };
+      : writeData;
     if (!ownerData) return;
-    ownerData.__typename = placeholder.type;
     writeData = ownerData;
     options = { ...options, dataId: placeholder.key };
   }
@@ -84,7 +83,6 @@ export function write(
         rootType: placeholder.type,
         possibleSelections: placeholder.selection,
         cache: false,
-        historySize: 0,
       }
     : resolveOperationDescriptor(
         env,
@@ -93,7 +91,7 @@ export function write(
         options.variables,
         rootNodeKey,
       );
-  if (!placeholder) touchOperation(env, store, operationDescriptor);
+  touchOperation(env, store, operationDescriptor);
   if (!placeholder && !operationDescriptor.cache) {
     // Results of this operation are never stored, so nothing will ever evict its descriptor.
     // Remember it, so that the outermost transaction can release it on completion.
@@ -118,7 +116,7 @@ export function write(
   assert(!existingResult?.prev);
 
   const pending =
-    deferred && !options.defer?.path && options.defer?.pending?.length
+    deferred && options.defer?.pending?.length
       ? {
           pending: new Set(
             options.defer.pending.map(({ path }) => path.join(".")),
