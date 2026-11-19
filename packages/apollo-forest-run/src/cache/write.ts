@@ -66,6 +66,8 @@ export function write(
   const placeholder =
     options.defer?.path && deferred?.get(options.defer.path.join("."));
   if (options.defer?.path) {
+    // Released or reset executions have no targets left to update.
+    if (!deferred) return;
     assert(placeholder, "Deferred path does not identify an original target");
     if (getNodeChunks([targetForest], placeholder.key).next().done) return;
     const ownerData = placeholder.path.length

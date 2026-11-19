@@ -301,6 +301,39 @@ describe("Apollo integration", () => {
     client.stop();
   });
 
+  test("ignores a replayed initial response after the cache changes", async () => {
+    const cache = new ForestRun();
+    const { client, request, send } = connect(cache);
+    const observable = client.watchQuery({
+      query,
+      fetchPolicy: "network-only",
+    });
+    const sub = observable.subscribe(() => undefined);
+    send(initial);
+    await flush();
+    const unnamed = { __typename: "Message", id: "2", text: "new" };
+    cache.writeQuery({
+      query: gql`
+        query {
+          messages {
+            id
+            text
+          }
+        }
+      `,
+      data: { messages: [unnamed, first] },
+    });
+    await flush();
+    send(final);
+    await flush();
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(cache.readQuery({ query, returnPartialData: true })).toEqual({
+      messages: [unnamed, { ...first, name: "Alice" }],
+    });
+    sub.unsubscribe();
+    client.stop();
+  });
+
   test("releases placeholders when a pending request is cancelled", async () => {
     const cache = new ForestRun();
     const { client, send } = connect(cache);
@@ -653,6 +686,15 @@ describe("server-announced incremental writes", () => {
     next(initial);
     next({ hasNext: false });
     expect(cache["deferredWrites"].size).toBe(0);
+  });
+
+  test("ignores patches after the cache is reset", () => {
+    const cache = new ForestRun();
+    const write = writer(cache);
+    write(initial);
+    cache.reset();
+    write(final);
+    expect(cache.extract()).toEqual({});
   });
 
   test("updates ID-less targets for every query reading their owner", () => {
