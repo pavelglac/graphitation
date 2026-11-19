@@ -3,7 +3,13 @@ import type {
   IndexedTree,
   UpdateTreeResult,
 } from "../forest/types";
-import type { OperationResult } from "../values/types";
+import type {
+  CompositeListChunk,
+  ObjectChunk,
+  OperationResult,
+  SourceObject,
+} from "../values/types";
+import { ValueKind } from "../values/types";
 import type {
   CacheEnv,
   DataForest,
@@ -115,15 +121,7 @@ export function write(
   // Safeguard: make sure previous state doesn't leak outside write operation
   assert(!existingResult?.prev);
 
-  const pending =
-    deferred && options.defer?.pending?.length
-      ? {
-          pending: new Set(
-            options.defer.pending.map(({ path }) => path.join(".")),
-          ),
-          placeholders: deferred,
-        }
-      : undefined;
+  const pending = options.defer?.pending?.length ? deferred : undefined;
   if (writeData === existingData && existingResult && !pending) {
     return {
       options,
@@ -158,8 +156,9 @@ export function write(
     operationResult,
     undefined,
     existingResult,
-    pending,
+    !!pending,
   );
+  if (pending) registerPlaceholders(incomingResult, options, pending);
 
   // ApolloCompat: necessary for fragment writes with custom ids
   if (options.dataId && incomingResult.rootNodeKey !== options.dataId) {
@@ -248,6 +247,42 @@ export function write(
     affectedNodes: aggregateAllAffectedNodes(difference, allUpdates),
     updateStats: allUpdates.map((update) => update.stats ?? null),
   };
+}
+
+// Binds each pending path to its nearest keyed object (owner) and the path below it.
+function registerPlaceholders(
+  tree: IndexedTree,
+  options: WriteOptions,
+  placeholders: DeferredPlaceholders,
+) {
+  for (const { path } of options.defer?.pending ?? EMPTY_ARRAY) {
+    let source = tree.result.data as Record<string, unknown> | undefined;
+    let owner;
+    let ownerPath: (string | number)[] = [];
+    for (let depth = 0; source && typeof source === "object"; depth++) {
+      const chunk = tree.dataMap.get(source as SourceObject)?.value as
+        | ObjectChunk
+        | CompositeListChunk
+        | undefined;
+      if (chunk?.kind === ValueKind.Object && chunk.key !== false) {
+        const type = chunk.type || (!depth && tree.operation.rootType);
+        assert(type, "Deferred owners must include __typename");
+        owner = { key: chunk.key, type, selection: chunk.possibleSelections };
+        ownerPath = [];
+      }
+      if (depth === path.length) {
+        assert(owner);
+        placeholders.set(path.join("."), {
+          ...owner,
+          operation: tree.operation,
+          path: ownerPath,
+        });
+        break;
+      }
+      ownerPath.push(path[depth]);
+      source = source[path[depth]] as Record<string, unknown> | undefined;
+    }
+  }
 }
 
 // Writes an ID-less deferred target as a sparse nested write to its keyed owner. Like Apollo,

@@ -76,11 +76,6 @@ export type DeferredPlaceholders = Map<
   }
 >;
 
-export type DeferredWriteContext = {
-  pending: Set<string>;
-  placeholders: DeferredPlaceholders;
-};
-
 export type HistoryFieldChange =
   | FillerChange
   | ReplacementChange

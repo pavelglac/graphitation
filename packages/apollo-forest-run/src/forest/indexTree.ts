@@ -16,15 +16,13 @@ import type {
   SourceObject,
   TypeMap,
   ParentLocator,
-  NodeKey,
 } from "../values/types";
 import type {
   NormalizedFieldEntry,
   OperationDescriptor,
   PossibleSelections,
-  TypeName,
 } from "../descriptor/types";
-import type { DeferredWriteContext, ForestEnv, IndexedTree } from "./types";
+import type { ForestEnv, IndexedTree } from "./types";
 import { ValueKind } from "../values/types";
 import {
   getFieldName,
@@ -67,27 +65,8 @@ type Context = {
   incompleteChunks: Set<ObjectChunk>;
   recycleTree: IndexedTree | null;
   findParent: ParentLocator;
-  deferred?: DeferredWriteContext;
+  deferred?: boolean;
 };
-
-// Tracks the response path and the nearest keyed object (owner) with the path below it.
-type DeferredPosition = {
-  path: string;
-  active: boolean;
-  owner?: { key: NodeKey; type: TypeName; selection: PossibleSelections };
-  ownerPath: (string | number)[];
-};
-
-function childPosition(
-  position: DeferredPosition,
-  part: string | number,
-): DeferredPosition {
-  return {
-    ...position,
-    path: `${position.path ? position.path + "." : ""}${part}`,
-    ownerPath: [...position.ownerPath, part],
-  };
-}
 
 const EMPTY_ARRAY = Object.freeze([]);
 const isArray = Array.isArray;
@@ -98,7 +77,7 @@ export function indexTree(
   result: OperationResult,
   knownMissingFields?: MissingFieldsMap,
   previousTreeState: IndexedTree | null = null,
-  deferred?: DeferredWriteContext,
+  deferred = false,
 ): IndexedTree {
   let rootNodeKey;
   try {
@@ -141,7 +120,6 @@ export function indexTree(
     result.data,
     operation.possibleSelections,
     rootRef,
-    deferred ? { path: "", active: false, ownerPath: [] } : undefined,
   );
   const tree: IndexedTree = {
     operation,
@@ -248,7 +226,7 @@ function reindexSharedTree(
   env: ForestEnv,
   tree: IndexedTree,
   root: ObjectChunk,
-  deferred?: DeferredWriteContext,
+  deferred: boolean,
 ): IndexedTree {
   const repaired = cloneSharedReferences(env, root);
   // Malformed, out-of-range list chunks may overcount without sharing actual data.
@@ -286,7 +264,6 @@ function indexSourceObject(
   source: SourceObject,
   possibleSelections: PossibleSelections,
   parent: GraphChunkReference,
-  position?: DeferredPosition,
 ) {
   const recycleTree = context.recycleTree;
   const recyclable =
@@ -325,31 +302,17 @@ function indexSourceObject(
     key,
     missingFields,
   );
-  if (context.deferred && position) {
-    const isPending = context.deferred.pending.has(position.path);
-    position.active ||= isPending;
-    if (key !== false) {
-      assert(typeName, "Deferred owners must include __typename");
-      position.owner = { key, type: typeName, selection: possibleSelections };
-      position.ownerPath = [];
-    }
-    if (position.active) {
-      for (const field of chunk.selection.fieldQueue) {
-        if (source[field.dataKey] === undefined) {
-          (chunk.missingFields ??= new Set()).add(field);
-        }
+  if (context.deferred) {
+    // Fields of pending fragments are absent until their patches arrive.
+    for (const field of selection.fieldQueue) {
+      if (
+        source[field.dataKey] === undefined &&
+        !selection.skippedFields?.has(field)
+      ) {
+        (chunk.missingFields ??= new Set()).add(field);
       }
     }
-    if (isPending) {
-      assert(position.owner);
-      context.deferred.placeholders.set(position.path, {
-        ...position.owner,
-        operation: op,
-        path: position.ownerPath,
-      });
-    }
   }
-
   if (parent) {
     dataMap.set(source, parent);
     context.indexedSources++;
@@ -400,7 +363,6 @@ function indexSourceObject(
           value,
           fieldInfo.selection,
           entryParentInfo,
-          position && childPosition(position, fieldInfo.dataKey),
         );
       } else if (isSourceObject(value)) {
         fieldValue = indexSourceObject(
@@ -408,7 +370,6 @@ function indexSourceObject(
           value,
           fieldInfo.selection,
           entryParentInfo,
-          position && childPosition(position, fieldInfo.dataKey),
         );
       } else if (value === null) {
         fieldValue = createCompositeNullChunk(
@@ -443,7 +404,6 @@ function indexSourceList(
   list: SourceCompositeList,
   selection: PossibleSelections,
   parent: GraphChunkReference,
-  position?: DeferredPosition,
 ) {
   const recycleTree = context.recycleTree;
   const recyclable =
@@ -466,21 +426,9 @@ function indexSourceList(
     };
     let item;
     if (Array.isArray(value)) {
-      item = indexSourceList(
-        context,
-        value,
-        selection,
-        itemParent,
-        position && childPosition(position, index),
-      );
+      item = indexSourceList(context, value, selection, itemParent);
     } else if (isSourceObject(value)) {
-      item = indexSourceObject(
-        context,
-        value,
-        selection,
-        itemParent,
-        position && childPosition(position, index),
-      );
+      item = indexSourceObject(context, value, selection, itemParent);
     } else if (value === null) {
       item = createCompositeNullChunk(operation, selection);
     } else {
@@ -490,13 +438,7 @@ function indexSourceList(
       if (!Object.isFrozen(list)) {
         list[index] = fixedValue;
       }
-      item = indexSourceObject(
-        context,
-        fixedValue,
-        selection,
-        itemParent,
-        position && childPosition(position, index),
-      );
+      item = indexSourceObject(context, fixedValue, selection, itemParent);
       item.missingFields = new Set([...item.selection.fields.values()].flat());
       markAsPartial(context, itemParent);
       context.incompleteChunks.add(item);
